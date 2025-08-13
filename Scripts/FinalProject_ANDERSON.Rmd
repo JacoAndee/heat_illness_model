@@ -1,0 +1,674 @@
+---
+title: "Heat-Illness Modeling in California"
+output: html_notebook
+---
+
+**Author: Jacob Anderson**
+
+**Research Question**:
+
+How do environmental and socioeconomic factors influence the risk of heat-related health concerns across counties in the state of California during periods of extreme heat?
+
+**The problem**:
+
+Extreme heat events are becoming more frequent and severe, increasing the burden on public health systems. California’s climatic diversity and population heterogeneity make it essential to understand how environmental factors and socioeconomic conditions jointly shape the risk of heat-related emergency visits. This notebook uses county-level data and Bayesian spatial regression to quantify associations and uncertainty.
+
+**Preliminary Tasks: Load libraries, set directories, and credentials**
+
+```{r Load arcgisbinding, tidycensus, sf, spdep, dpylr, mice, naniar, corrplot, performance, INLA, ggplot2, viridis}
+
+### Load all the relevant packages
+
+library(arcgisbinding)
+library(tidycensus)
+library(sf)
+library(spdep)
+library(dplyr)
+library(mice)
+library(naniar)
+library(corrplot)
+library(performance)
+library(INLA)
+library(ggplot2)
+library(viridis)
+library(RColorBrewer)
+arc.check_product()
+```
+
+```{r Set file path locations}
+
+### Set the working project directories
+
+setwd("C:/Users/ja090/Desktop/Files/JHU/SU25_STATS/Project/heat_illness_model/Data")
+
+### Set the main data directory to an R object
+
+data_dir <- "C:/Users/ja090/Desktop/Files/JHU/SU25_STATS/Project/heat_illness_model/Data"
+
+### Set the geodatabase directory to an R object
+
+gdb_path <- file.path(data_dir, "Project_Data.gdb")
+
+### Inspect the geodatabase contents
+
+gis_data <- arc.open(file.path(data_dir, "Project_Data.gdb"))
+print(gis_data)
+```
+
+```{r Apply credentials}
+
+### Check for valid ArcGIS license
+
+arc.check_product()
+
+### Save the census api key in script
+
+tidycensus::census_api_key(
+  key = "1d9fe19026f3759c68bc48e2c7ddf1b2b17ec47b",
+  install = F, 
+  overwrite = F)
+```
+
+**Task 1: Fetch American Community Survey Data for Demographic Variables**
+
+```{r Set variables and make request to ACS API}
+
+### Setting the variables to extract from ACS
+
+vars = c(total_pop = "B01001_001E",
+         m_under_5 = "B01001_003E", 
+         f_under_5 = "B01001_027E", 
+         m_65_66 = "B01001_020E", 
+         m_67_69 = "B01001_021E", 
+         m_70_74 = "B01001_022E", 
+         m_75_79 = "B01001_023E", 
+         m_80_84 = "B01001_024E", 
+         m_above_85 = "B01001_025E",
+         f_65_66 = "B01001_044E", 
+         f_67_69 = "B01001_045E", 
+         f_70_74 = "B01001_046E", 
+         f_75_79 = "B01001_047E", 
+         f_80_84 = "B01001_048E", 
+         f_above_85 = "B01001_049E", 
+         tot_pov = "B17020_001E",
+         tot_hh = "B08201_001E",
+         tot_hu = "B25034_001E",
+         hh_no_veh = "B08201_002E",
+         hu_after_2020 = "B25034_002E",
+         hu_before_1939 = "B25034_011E", 
+         pop_wht_alone = "B03002_003E", 
+         pop_blk_aa_alone = "B03002_004E", 
+         pop_asian_alone = "B03002_005E",
+         pop_natam_alone = "B03002_006E", 
+         pop_hisp = "B03002_012E")
+
+### Make the request
+### Get ACS tables
+### Calculate percentages from the demographic variables
+
+ca_acs <- get_acs(geography = "county",
+                  state = "CA",
+                  variables = vars,
+                  year = 2022,
+                  geometry = T,
+                  output = "wide",
+                  survey = "acs5"
+) %>%
+  st_transform(3310) %>%
+  mutate(
+    pop_under_5  = m_under_5 + f_under_5,
+    pop_over_65  = m_65_66 + m_67_69 + m_70_74 +
+                  m_75_79 + m_80_84 + m_above_85 +
+                  f_65_66 + f_67_69 + f_70_74 +
+                  f_75_79 + f_80_84 + f_above_85,
+    pct_under_5  = pop_under_5  / total_pop,
+    pct_over_65  = pop_over_65  / total_pop,
+    pct_pov = tot_pov / total_pop,
+    pct_hh_no_veh = hh_no_veh / tot_hh,
+    pct_hu_after_2020 = hu_after_2020 / tot_hu,
+    pct_hu_before_1939 = hu_before_1939 / tot_hu,
+    pct_wht_alone = pop_wht_alone / total_pop,
+    pct_blk_aa_alone = pop_blk_aa_alone / total_pop,
+    pct_asian_alone = pop_asian_alone / total_pop,
+    pct_natam_alone = pop_natam_alone / total_pop,
+    pct_hisp = pop_hisp / total_pop
+  )
+
+### Store the ACS data as data frame
+
+ca_acs_df <- as.data.frame(ca_acs)
+
+### Inspect the ACS table
+
+head(ca_acs_df)
+```
+
+**Task 2: Import hospitalization table**
+
+```{r Read health outcome data}
+
+### Open the hospitalizations table using arc.open function
+
+ca_er <- arc.open(file.path(gdb_path, "Heat_Related_Hospitalizations_2023"))
+
+### Select the table using arc.select function
+
+ca_er_df <- arc.select(ca_er)
+
+### Ensure the "Number of cases" field is numeric
+
+ca_er_df$ER_visits <- as.numeric(
+  gsub("N/A", NA, ca_er_df$Number_of_cases))
+```
+
+**Task 3: Import California shapefile containing joined NOAA and NLCD data**
+
+```{r Read Covariate table}
+### Open the covariates feature class using arc.open function
+
+ca_cov <- arc.open(file.path(gdb_path, "ca_county_covariates"))
+
+### Select the covariates feature class using arc.select function
+
+ca_cov_df <- arc.select(ca_cov)
+
+### Ensure each variable is preserved using select function
+
+ca_cov_sf <- arc.data2sf(ca_cov_df) %>%
+  select(
+    GEOID,
+    NAME,
+    NAMELSAD,
+    STUSPS,
+    STATE_NAME,
+    AREA_SQM,
+    STATION,
+    Latitude,
+    Longitude,
+    Mean_TMIN,
+    Mean_TMAX,
+    Total_PRCP,
+    Mean_AWND,
+    pct_water,
+    pct_ice,
+    pct_open_dev,
+    pct_low_dev,
+    pct_med_dev,
+    pct_high_dev,
+    pct_barren,
+    pct_dfor,
+    pct_efor,
+    pct_mfor,
+    pct_shrub,
+    pct_grassland,
+    pct_pasture,
+    pct_crop,
+    pct_wwetland,
+    pct_hwetland,
+    pct_non_urb,
+    pct_roads,
+    pct_urb,
+    MEAN_tcc,
+    MEAN_lst
+  )
+```
+
+**Task 4: Assemble the modeling table by joining the data onto a spatial data frame**
+
+```{r Join the Heat Illness and ACS variable tables onto the spatial data frame}
+
+### Add the GEOID field into the health outcome data frame
+
+ca_er_df_joined <- ca_er_df %>%
+  left_join(
+    ca_cov_sf %>% 
+      st_drop_geometry() %>% 
+      transmute(GEOID, Counties = NAME),
+    by = "Counties"
+  ) %>%
+  select(GEOID, ER_visits)
+
+### Join the tables on common attributes
+### Calculate rate of ER visits per 100,000 residents in each county
+
+model_sf <- ca_cov_sf %>%
+  left_join(ca_acs_df, by = "GEOID") %>%
+  left_join(ca_er_df_joined, by = "GEOID") %>%
+  mutate(
+    ER_visits = as.numeric(ER_visits),
+    total_pop = as.numeric(total_pop),
+    ER_per_100k = ifelse(!is.na(ER_visits) & !is.na(total_pop),
+                              (ER_visits / total_pop) * 100000, NA))
+
+### Create a geometry free data frame
+
+model_no_geom <- st_drop_geometry(model_sf)
+
+### Inspect the geometry free data frame
+
+head(model_no_geom)
+```
+
+**Task 5: Diagnose the missingness of the model data frame**
+
+```{r Imputation of missing predictor and explantory variables}
+
+### Create a list of variables
+### Define candidate variables to be imputed (environmental and socioeconomic covariates)
+
+imput_vars <- c(
+    "Mean_TMIN",
+    "Mean_TMAX",
+    "Total_PRCP",
+    "Mean_AWND",
+    "pct_water",
+    "pct_ice",
+    "pct_open_dev",
+    "pct_low_dev",
+    "pct_med_dev",
+    "pct_high_dev",
+    "pct_barren",
+    "pct_dfor",
+    "pct_efor",
+    "pct_mfor",
+    "pct_shrub",
+    "pct_grassland",
+    "pct_pasture",
+    "pct_crop",
+    "pct_wwetland",
+    "pct_hwetland",
+    "pct_non_urb",
+    "pct_roads",
+    "pct_urb",
+    "MEAN_tcc",
+    "MEAN_lst",
+    "pct_under_5",
+    "pct_over_65",
+    "pct_pov",
+    "pct_hh_no_veh",
+    "pct_hu_after_2020",
+    "pct_hu_before_1939",
+    "pct_wht_alone",
+    "pct_blk_aa_alone",
+    "pct_asian_alone",
+    "pct_natam_alone",
+    "pct_hisp"
+)
+
+### Keep only variables that exist in model_no_geom
+### The intersect function returns the common variable names between the imput_vars list
+### and the actual column names in model_no_geom, ensuring no invalid names are used in the modeling
+
+imput_vars <- intersect(imput_vars, names(model_no_geom))
+
+### Create a subset data frame with only the variables to be imputed
+
+imput_df <- model_no_geom[, imput_vars, drop = F]
+
+### Perform multiple imputation using mice:
+### m = 5: create 5 imputed datasets
+### method = "pmm": predictive mean matching
+### seed = 123: reproducibility
+
+imput_mice <- mice(
+  imput_df,
+  m = 5,
+  method = "pmm",
+  seed = 123
+)
+
+### Extract the first completed dataset
+
+imput_comp <- mice::complete(imput_mice, 1)
+
+### Write imputed values back into both mirrors
+
+model_sf[, imput_vars] <- imput_comp
+model_no_geom[, imput_vars] <- imput_comp
+```
+
+This section above selects covariates to impute, constructs an imputation data frame, and performs multiple imputation with **mice** using Predictive Mean Matching. The first completed dataset is then written back into both the spatial and non-spatial mirrors. Conceptually, this approximates a joint Bayesian treatment of missing predictors under MAR by drawing values for missing values conditional on observed values.
+
+```{r Check for collinearity with correlation matrix}
+
+### Compute and visualize the pairwise correlation matrix among imputed variables
+### This process helps assess multicollinearity and identify redundant predictors before modeling
+### Pairwise correlation matrix
+
+### Select the imputed variables from the geometry free dataset
+
+num_vars <- model_no_geom[, imput_vars, drop = F]
+
+### Compute the correlation matrix
+
+pwise_matrix <- cor(
+  num_vars,
+  use = "pairwise.complete.obs")
+  round(pwise_matrix, 2)
+
+### Visualize the Pairwise correlation matrix
+
+plot_cols <- colorRampPalette(brewer.pal(11, "PuOr"))(200)
+
+corrplot::corrplot(
+  pwise_matrix, 
+  col = plot_cols,
+  method = "color",
+  type = "full",
+  tl.col = "black",
+  tl.cex = 0.5)
+```
+This section generates a pairwise correlation matrix for all imputed candidate predictors, and visualizes the matrix with a diverging color scale. The plot reveals potential multicollinearity among the candidate predictors, which can cause difficulties in quantifying posterior uncertainty in a Bayesian regression. This informs whether careful variable selection may be warranted before fitting the model.
+
+```{r Prior checks}
+
+### Define a subset of predictors for prior predictive checks, define weakly informed
+### priors for coefficients and noise, simulate from the prior predictive
+### distribution, and visualize the scale of the outcome
+
+### Define fixed-effects variables to include in prior predictive checks
+
+fx_vars <- c(
+  "Mean_TMAX",
+  "Total_PRCP",
+  "Mean_AWND",
+  "MEAN_lst",
+  "pct_urb",
+  "pct_roads",
+  "MEAN_tcc",
+  "pct_pov",
+  "pct_over_65",
+  "pct_hu_before_1939"
+)
+
+### Keep only variables that exist in model_no_geom
+### The intersect function returns only the names that are present in BOTH fx_vars and model_no_geom,
+### preventing errors from missing columns and ensuring the design matrix matches existing data
+
+fx_vars <- intersect(fx_vars, names(model_no_geom))
+
+### Create data frame with just the prior check predictors
+
+prior_df <- model_no_geom[, fx_vars, drop = F]
+
+### Standardize predictors to mean 0 and sd 1 for interpretability
+
+prior_df <- scale(prior_df)
+
+### Create matrix 'X' with intercept column
+
+X <- as.matrix(cbind(Intercept = 1, model_no_geom[,fx_vars]), drop = F)
+
+### Set seed for reproducability
+
+set.seed(123) 
+
+### Number of prior draws for coefficients
+
+n_draws <- 1000
+
+### Prior SD for coefficients
+
+beta_sd <- 0.5
+
+### Prior SD for noise
+
+sigma_obs <- 2
+
+### Draw coefficient matrix B ~ Normal(0, beta_sd^2) for each parameter across n_draws
+### Dimensions: n_params x n_draws
+
+B <- matrix(rnorm(ncol(X)* n_draws, mean = 0, sd = beta_sd), nrow = ncol(X), ncol = n_draws)
+
+### Compute prior linear predictor for all draws
+
+mu_prior <- as.vector(X %*% B)
+
+### Simulate prior predictive outcomes
+
+y_prior <- mu_prior + rnorm(length(mu_prior), mean = 0, sd = sigma_obs)
+
+### Create μ data frame for plotting
+
+mu_df <- data.frame(mu = as.numeric(mu_prior))
+
+### Plot density of μ
+
+ggplot(mu_df, aes(x = mu)) +
+  geom_density(fill = "deeppink", alpha = 0.5) +
+  theme_minimal() +
+  labs(
+    title = "Prior Predictive Distribution (Gaussian)",
+    x = "ER visits per 100k (simulated)",
+    y = "Density"
+  )
+```
+The prior predictive distribution is sharply centered at zero with extremely heavy concentration around the mean and relatively thin and long tails extending beyond 3,000 emergency room visits per 100,000 residents. This shape reflects the combination of relatively small coefficient priors (β_sd = 0.5) and a modest observation noise prior (σ = 2), applied to predictors on their original scale. The concentration centered near zero indicates, prior to observing data, the model strongly favors mean emergency visit rates close to zero, with only rare draws producing extreme values. In the context of this study, this prior is conservative, as it encodes the belief that large changes in emergency visit rates due to environmental or socioeconomic predictors are unlikely without data evidence.
+
+Given that real world emergency room visit rates per 100,000 residents can vary substantially during extreme heat events, this prior predictive spread may be too narrow to fully capture the extremes. The long but infrequent tails indicate that large effects are possible under the prior, but their probability is minimal. If domain knowledge suggests a wider range of plausible baseline outcomes or stronger predictor effects, adjusting the priors or standardizing all predictors before prior checks could yield a prior predictive distribution more consistent with the observed scale of the phenomenon.
+
+**Task 6: Construct INLA Model**
+
+``` {r Build spatial adjacency and construct the model}
+
+### Store the predictors as vector (from the prior check)
+
+pred_vars <- fx_vars
+
+### Keep only rows with complete cases for outcome and predictors to be modeled
+
+keep <- complete.cases(st_drop_geometry(model_sf)[, c("ER_per_100k", pred_vars)])
+
+### Subset the spatial data frame to modeling rows only
+
+sf_fit <- model_sf[keep, ]
+
+### Build polygon contiguity neighbors on the subset spatial data frame
+
+nb <- spdep::poly2nb(sf_fit, row.names = sf_fit$GEOID)
+
+### Write the INLA adjacency graph file from 'nb'
+
+spdep::nb2INLA("ca_graph_gauss.adj", nb)
+
+### Make ID that matches graph node order
+sf_fit$ID <- match(sf_fit$GEOID, attr(nb, "region.id"))
+
+### Define the regression model with BYM2 spatial random effect on ID
+
+formula_inla <- ER_per_100k ~
+  Mean_TMAX + Total_PRCP + Mean_AWND + MEAN_lst + pct_urb + 
+  pct_roads + MEAN_tcc + pct_pov + pct_over_65 + pct_hu_before_1939 +
+  f(
+    ID,
+    model = "bym2", 
+    graph = "ca_graph_gauss.adj")
+
+### Fit the INLA model:
+### family = "gaussian": Normal likelihood for ER_per_100k
+### control.predictor: compute fitted values on observed data rows
+### control.compute: compute DIC, WAIC, and CPO for model diagnostics
+
+inla_fit <- inla(
+  formula_inla,
+  data = as.data.frame(sf_fit),
+  family = "gaussian",
+  control.predictor = list(compute = T),
+  control.compute = list(dic = T, waic = T, cpo = T)
+)
+
+### Check the diagnostics of the regression model
+
+summary(inla_fit)
+```
+We subset the data to complete cases, constructed **contiguity neighbors** and exported them as an **INLA graph file**,and then matched an integer **ID** with the graph order. Next, defining a **Gaussian BYM2** model decomposing spatial effects into structured and unstructured components and fit it with **INLA**, and then requesting **DIC, WAIC, and CPO** for model diagnostics for further assessment and interpretation. This enables partial pooling across adjacent counties while allowing non-spatial heterogeneity, which addresses spatial dependence in heat related emergency room visit rates.
+
+The BYM2 spatial regression model fits adequately for county level emergency room visits during periods of extreme heat: The DIC = 89.6 and WAIC = 89.6 are modest with small effective parameter counts (10 and 8), indicating a good balance of fit versus complexity rather than overfitting. CPO was also computed, which suggests the posterior predictive distribution generally covers observed county rates, and that counties with unusually small CPO's would be places where the model under predicts risk and may need additional covariates to consider in the model. In Bayesian terms, the model appears to perform decent for out of sample predictions, while borrowing strength across neighboring counties through the BYM2 spatial effect.
+
+The variable **Mean_TMAX** highlights positive association with emergency room visits (posterior mean = 0.63, 95% credible interval = 0.26 - 1.02), which indicates higher daily max temps are credibly linked to more heat-related emergency room visits. The other covariates 95% credible intervals include zero (precipitation, wind, land surface temperature, urbanization, poverty, age 65+, pre-1939 housing), implying insufficient evidence in this model to claim non zero effects after accounting for temperature and spatial structure. Overall, temperature is the most well identified driver in this model specification, while other effects remain uncertain and could be clarified with alternative specifications.
+
+**Task 7: Summarize and visualize the model results**
+
+```{r Posterior summaries and spatial plotting of model results}
+
+### Extract the posterior summaries of values from the INLA model, attach them
+### to the spatial data, compute an interval width as an uncertainty measure, and
+### visualize posterior uncertainty (mean, standard deviation, and 95% credible intervals) across counties
+
+### Extract observation value summaries (mean, sd, and quantiles) from INLA
+
+fit_sum <- inla_fit$summary.fitted.values
+
+### Attach posterior mean of the fitted value to the spatial data frame
+
+sf_fit$fit_mean <- fit_sum$mean
+
+### Attach posterior standard deviation of the fitted value to the spatial data frame
+
+sf_fit$fit_sd <- fit_sum$sd
+
+### Attach lower 2.5% quantile to the spatial data frame
+
+sf_fit$fit_low <- fit_sum[,"0.025quant"]
+
+### Attach upper 97.5% quantile to the spatial data frame
+
+sf_fit$fit_high <- fit_sum[,"0.975quant"]
+
+### Compute the credible interval width as a simple scale of uncertainty per area
+
+sf_fit$fit_ci_width <- sf_fit$fit_high - sf_fit$fit_low
+
+### Compute the residuals
+
+sf_fit$residuals <- sf_fit$fit_mean - sf_fit$ER_per_100k
+
+### Ensure columns are intact using the intersect function
+
+results_cols <- intersect(c(
+  "GEOID", 
+  "fit_mean", 
+  "fit_sd", 
+  "fit_low", 
+  "fit_high", 
+  "fit_ci_width", 
+  "residuals"),
+  names(sf_fit)
+)
+
+### Construct results data frame to then join onto the spatial data frame
+
+results_df <- st_drop_geometry(sf_fit)[, c(
+  "GEOID",
+  "fit_mean",
+  "fit_sd",
+  "fit_low",
+  "fit_high",
+  "fit_ci_width",
+  "residuals"
+)]
+
+### Left join model summaries to spatial data frame to map results
+
+model_sf_full <- left_join(
+  model_sf,
+  results_df,
+  by = "GEOID"
+)
+```
+
+```{r Posterior Mean plot}
+
+### Map the posterior mean (higher values = more uncertainty)
+
+ggplot(model_sf_full) +
+  geom_sf(aes(fill = fit_mean)) +
+  scale_fill_viridis(name = "Posterior Mean", option = "magma", na.value = "grey90") +
+  theme_minimal() +
+  labs(title = "Predictive Uncertainty (Mean)")
+```
+
+``` {r Posterior standard deviation plot}
+
+### Map the posterior standard deviation (higher values = more uncertainty)
+
+ggplot(model_sf_full) +
+  geom_sf(aes(fill = fit_sd)) +
+  scale_fill_viridis(name = "Posterior SD", option = "magma", na.value = "grey90") +
+  theme_minimal() +
+  labs(title = "Predictive Uncertainty (SD)")
+```
+
+```{r Posterior 95% credible interval width plot}
+
+### Map the posterior 95% credible interval width (higher values = more uncertainty)
+
+ggplot(model_sf_full) +
+  geom_sf(aes(fill = fit_ci_width)) +
+  scale_fill_viridis(name = "95% CI Width", option = "magma", na.value = "grey90") +
+  theme_minimal() +
+  labs(title = "Predictive Uncertainty (CI Width)")
+```
+This section extracts posterior fitted summaries (mean, standard deviation, and 95% credible intervals) from the model, computes a credible interval width as an uncertainty measure, and maps the posterior mean, standard deviation, and credible interval width across counties. Darker areas indicate higher uncertainty in the fitted mean emergency room visit rate, highlighting counties where data are sparse, predictors are less informative, or spatial borrowing leaves greater ambiguity.
+
+Based on the resulting plots, the posterior mean map highlights that lighter areas are indicative of higher risk of heat related illness, whereas dark areas represent lower risk to heat related illness. This pattern is the most concerning in Imperial and Shasta counties, with moderate concern of this health risk in Butte county.In counties in close proximity to the coast, such as Los Angeles county, the risk is minimal. Both the posterior standard deviation and 95% CI width map highlight where estimates are least certain. Uncertainty is higher in isolated counties, as the model has less information to borrow in these areas. Areas with sufficiently modeled neighbors show tighter uncertainty due to stronger spatial pooling.
+
+```{r Residual plot}
+
+### Compute residuals and plot to assess where the model over or under predicts
+### Compute residual for modeled values:
+### Positive = over prediction (fitted mean > observed), Negative = under prediction
+### Map the spatial residuals
+
+ggplot(model_sf_full) +
+  geom_sf(aes(fill = residuals)) +
+  scale_fill_viridis(name = "Residual", option = "magma", na.value = "grey90") +
+  theme_minimal() +
+  labs(title = "Spatial Residuals (Predicted - Observed)")
+```
+This section computes residuals as **Predicted − Observed**, then maps them to reveal **systematic bias**. Light colors indicate **overprediction**, whereas dark colors indicate **underprediction**. Spatial clustering of similar residual values suggest remaining structure not captured by the fixed effects or the INLA model component. 
+
+Based on the resulting plot, counties with positive residual values (lighter colors) represent higher than expected risk of heat related illness, and this is observed in Ventura and San Joaquin counties, given the parameters that were modeled. Conversely, counties with negative residual values (darker colors) represent lower than expected risk of heat related illness, and this can be observed in Butte, Contra Costa, Sacramento, and San Bernardino counties. 
+
+```{r Predicted vs Observed plot}
+
+### Visualize fitted posterior means and observed outcomes,
+### and compute R^2 (squared Pearson correlation) as a summary
+
+### Compute R^2 as squared Pearson correlation between fitted mean and observed values
+df_fit <- st_drop_geometry(sf_fit)
+r2_val <- cor(
+  df_fit$fit_mean,
+  df_fit$ER_per_100k,
+  use = "complete.obs"
+)^2
+
+### Scatter plot of predicted (x) and observed (y)
+
+ggplot(df_fit, aes(x = fit_mean, y = ER_per_100k)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "deeppink") +
+  theme_minimal() +
+  labs(title = paste0("Predicted vs Observed (per 100k), R² = ", round(r2_val, 2)),
+       x = "Predicted per 100k", y = "Observed per 100k")
+```
+
+**Research question**:
+
+How do environmental and socioeconomic factors influence the risk of heat-related health concerns across counties in California during periods of extreme heat?
+
+**Key findings**: 
+
+Temperature (Mean_TMAX) is a primary driver of heat related illness in California (posterior mean = 0.63, 95% credible interval = 0.26–1.02), even after accounting for spatial effects. The other covariates modeled significant uncertainty and ambiguity once temperature was introduced into the model. Nonetheless, the model itself reflects a modest fit, with minimal overfitting. In terms of the spatial considerations of the posterior summaries and residuals, uncertainty is prevalent and strong in more spatially isolated counties, whereas the residual summary plot indicates that there is significant under prediction in the central and eastern most counties, and over prediction in counties near the coast. 
+
+**Interpretation**: 
+
+Overall, the influence of temperature is the dominant, well identified risk factor for heat related illness in California. Other environmental and socioeconomic predictor variables exhibit the most uncertainty, and further experimentation will be needed to accurately capture the impact of these factors.
+
+**Limitations**: 
+
+In terms of the limitations to this study, modeling emergency room visits and assuming a Gaussian model, a Poisson model with a population weight would better predict these health outcomes. Additionally, posterior mean, standard deviation, 95% credible intervals, and residuals were modeled on a county level, meaning the true impact of these results should be considered based on the scale of the data.
+
+**Conclusion**:
+
+Overall, this Bayesian spatial analysis promotes important considerations to public health driven by environmental and socioeconomic factors. Higher daily maximum temperatures significantly increase visits to emergency room visits in California, and the resulting summaries and plots of uncertainty highlights areas of high and low risk, and also identifying areas where more data or evidence can be introduced to the model

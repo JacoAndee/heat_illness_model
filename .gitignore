@@ -2,9 +2,13 @@
 # Ignore everything by default
 *
 
-# Allow only these folders
+# Allow Scripts and everything inside
 !Scripts/
+!Scripts/**
+
+# Allow Outputs and everything inside
 !Outputs/
+!Outputs/**
 
 # Allow the .Rproj file and .gitignore
 !*.Rproj
