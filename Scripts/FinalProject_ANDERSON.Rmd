@@ -387,59 +387,55 @@ fx_vars <- c(
 
 fx_vars <- intersect(fx_vars, names(model_no_geom))
 
-### Create data frame with just the prior check predictors
+### Build standardized predictor matrix for X
 
-prior_df <- model_no_geom[, fx_vars, drop = F]
+x_raw <- as.matrix(model_no_geom[,fx_vars, drop = F])
 
-### Standardize predictors to mean 0 and sd 1 for interpretability
+x_scaled <- scale(x_raw)
 
-prior_df <- scale(prior_df)
+x <- cbind(Intercept = 1, x_scaled)
 
-### Create matrix 'X' with intercept column
+### Set priors
 
-X <- as.matrix(cbind(Intercept = 1, model_no_geom[,fx_vars]), drop = F)
+y <- model_no_geom$ER_per_100k
 
-### Set seed for reproducability
+beta0_mean <- mean(y, na.rm = T)
 
-set.seed(123) 
+beta0_sd <- sd(y, na.rm = T)
 
-### Number of prior draws for coefficients
+beta_sd <- 0.3
+
+sigma_obs <- sd(y, na.rm = T)/2
+
+### Draw coefficients
+
+set.seed(123)
 
 n_draws <- 1000
 
-### Prior SD for coefficients
+p <- ncol(x)
 
-beta_sd <- 0.5
+b <- matrix(0, nrow = p, ncol = n_draws)
 
-### Prior SD for noise
+b[1,] <- rnorm(n_draws, beta0_mean, beta0_sd)
 
-sigma_obs <- 2
+b[2:p,] <-matrix(rnorm((p-1)*n_draws, 0, beta_sd), nrow = p - 1)
 
-### Draw coefficient matrix B ~ Normal(0, beta_sd^2) for each parameter across n_draws
-### Dimensions: n_params x n_draws
+### Prior predictive check
 
-B <- matrix(rnorm(ncol(X)* n_draws, mean = 0, sd = beta_sd), nrow = ncol(X), ncol = n_draws)
+mu_prior <- x %*% b
 
-### Compute prior linear predictor for all draws
+y_prior <- mu_prior + matrix(rnorm(length(mu_prior), 0, sigma_obs), nrow = nrow(mu_prior))
 
-mu_prior <- as.vector(X %*% B)
+### Plot the prior
 
-### Simulate prior predictive outcomes
-
-y_prior <- mu_prior + rnorm(length(mu_prior), mean = 0, sd = sigma_obs)
-
-### Create μ data frame for plotting
-
-mu_df <- data.frame(mu = as.numeric(mu_prior))
-
-### Plot density of μ
-
-ggplot(mu_df, aes(x = mu)) +
+df_prior <- data.frame(y = as.numeric(y_prior))
+ggplot(df_prior, aes(x = y)) +
   geom_density(fill = "deeppink", alpha = 0.5) +
   theme_minimal() +
   labs(
-    title = "Prior Predictive Distribution (Gaussian)",
-    x = "ER visits per 100k (simulated)",
+    title = "Prior Distribution (Gaussian)",
+    x = "ER Visits per 100k",
     y = "Density"
   )
 ```
@@ -585,7 +581,7 @@ ggplot(model_sf_full) +
   geom_sf(aes(fill = fit_mean)) +
   scale_fill_viridis(name = "Posterior Mean", option = "magma", na.value = "grey90") +
   theme_minimal() +
-  labs(title = "Predictive Uncertainty (Mean)")
+  labs(title = "Uncertainty (Posterior Mean)")
 ```
 
 ``` {r Posterior standard deviation plot}
@@ -596,7 +592,7 @@ ggplot(model_sf_full) +
   geom_sf(aes(fill = fit_sd)) +
   scale_fill_viridis(name = "Posterior SD", option = "magma", na.value = "grey90") +
   theme_minimal() +
-  labs(title = "Predictive Uncertainty (SD)")
+  labs(title = "Uncertainty (Posterior SD)")
 ```
 
 ```{r Posterior 95% credible interval width plot}
@@ -607,7 +603,7 @@ ggplot(model_sf_full) +
   geom_sf(aes(fill = fit_ci_width)) +
   scale_fill_viridis(name = "95% CI Width", option = "magma", na.value = "grey90") +
   theme_minimal() +
-  labs(title = "Predictive Uncertainty (CI Width)")
+  labs(title = "Uncertainty (Posterior CI Width)")
 ```
 This section extracts posterior fitted summaries (mean, standard deviation, and 95% credible intervals) from the model, computes a credible interval width as an uncertainty measure, and maps the posterior mean, standard deviation, and credible interval width across counties. Darker areas indicate higher uncertainty in the fitted mean emergency room visit rate, highlighting counties where data are sparse, predictors are less informative, or spatial borrowing leaves greater ambiguity.
 
@@ -633,9 +629,9 @@ Based on the resulting plot, counties with positive residual values (lighter col
 ```{r Predicted vs Observed plot}
 
 ### Visualize fitted posterior means and observed outcomes,
-### and compute R^2 (squared Pearson correlation) as a summary
+### and compute R² as a summary
 
-### Compute R^2 as squared Pearson correlation between fitted mean and observed values
+### Compute R² between fitted mean and observed values
 df_fit <- st_drop_geometry(sf_fit)
 r2_val <- cor(
   df_fit$fit_mean,
@@ -651,8 +647,33 @@ ggplot(df_fit, aes(x = fit_mean, y = ER_per_100k)) +
   theme_minimal() +
   labs(title = paste0("Predicted vs Observed (per 100k), R² = ", round(r2_val, 2)),
        x = "Predicted per 100k", y = "Observed per 100k")
-```
 
+### Posterior mean
+
+mu <- inla_fit$summary.fitted.values$mean
+
+row <- grep("Precision for the Gaussian observations", rownames(inla_fit$summary.hyperpar))
+
+tau_med <- inla_fit$summary.hyperpar[row, "0.5quant"]
+
+sigma <- 1 / sqrt(tau_med)
+
+set.seed(123)
+
+y_posterior <- rnorm(length(mu), mean = mu, sd = sigma)
+
+### Posterior plot
+
+df_post <- data.frame(y = y_posterior)
+ggplot(df_post, aes(x = y)) +
+  geom_density(fill = "purple", alpha = 0.5) +
+  theme_minimal() +
+  labs(
+    title = "Posterior Distribution (Gaussian)",
+    x = "ER Visits per 100k",
+    y = "Density"
+  )
+```
 **Research question**:
 
 How do environmental and socioeconomic factors influence the risk of heat-related health concerns across counties in California during periods of extreme heat?
