@@ -2,7 +2,7 @@
 
 library(tidycensus)
 
-tidycensus::census_api_key(key = "1d9fe19026f3759c68bc48e2c7ddf1b2b17ec47b",
+tidycensus::census_api_key(key = "CENSUS_API_KEY",
                            install = T, overwrite = T)
 v22 <- load_variables(year = 2022,
                       dataset = "acs5/profile",
