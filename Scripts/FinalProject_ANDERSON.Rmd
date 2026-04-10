@@ -1,6 +1,6 @@
 ---
 title: "Heat-Illness Modeling in California"
-output: html_notebook
+output: md_document
 ---
 
 # Heat-Illness Modeling in California
@@ -600,15 +600,15 @@ ggplot(model_sf_full) +
   labs(title = "Uncertainty (Posterior SD)")
 ```
 
-### Posterior 95% credible interval width map
+### Posterior 95 credible interval width map
 
-```{r Posterior 95% credible interval width plot}
+```{r Posterior 95 credible interval width plot}
 
-### Map the posterior 95% credible interval width (higher values = more uncertainty)
+### Map the posterior 95 credible interval width (higher values = more uncertainty)
 
 ggplot(model_sf_full) +
   geom_sf(aes(fill = fit_ci_width)) +
-  scale_fill_viridis(name = "95% CI Width", option = "magma", na.value = "grey90") +
+  scale_fill_viridis(name = "95 CI Width", option = "magma", na.value = "grey90") +
   theme_minimal() +
   labs(title = "Uncertainty (Posterior CI Width)")
 ```
