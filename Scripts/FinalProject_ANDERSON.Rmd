@@ -3,17 +3,15 @@ title: "Heat-Illness Modeling in California"
 output: html_notebook
 ---
 
+# Heat-Illness Modeling in California
+
 **Author: Jacob Anderson**
 
-**Research Question**:
+**Research Question**: How do environmental and socioeconomic factors influence the risk of heat-related health concerns across counties in the state of California during periods of extreme heat?
 
-How do environmental and socioeconomic factors influence the risk of heat-related health concerns across counties in the state of California during periods of extreme heat?
+**The problem**: Extreme heat events are becoming more frequent and severe, increasing the burden on public health systems. California’s climatic diversity and population heterogeneity make it essential to understand how environmental factors and socioeconomic conditions jointly shape the risk of heat-related emergency visits. This notebook uses county-level data and Bayesian spatial regression to quantify associations and uncertainty.
 
-**The problem**:
-
-Extreme heat events are becoming more frequent and severe, increasing the burden on public health systems. California’s climatic diversity and population heterogeneity make it essential to understand how environmental factors and socioeconomic conditions jointly shape the risk of heat-related emergency visits. This notebook uses county-level data and Bayesian spatial regression to quantify associations and uncertainty.
-
-**Preliminary Tasks: Load libraries, set directories, and credentials**
+### Preliminary Tasks: Load libraries, set directories, and credentials
 
 ```{r Load arcgisbinding, tidycensus, sf, spdep, dpylr, mice, naniar, corrplot, performance, INLA, ggplot2, viridis}
 
@@ -64,12 +62,12 @@ arc.check_product()
 ### Save the census api key in script
 
 tidycensus::census_api_key(
-  key = "1d9fe19026f3759c68bc48e2c7ddf1b2b17ec47b",
-  install = F, 
-  overwrite = F)
+  key = Sys.getenv("CENSUS_API_KEY"),
+  install = T, 
+  overwrite = T)
 ```
 
-**Task 1: Fetch American Community Survey Data for Demographic Variables**
+### Task 1: Fetch American Community Survey data for demographic variables
 
 ```{r Set variables and make request to ACS API}
 
@@ -143,7 +141,7 @@ ca_acs_df <- as.data.frame(ca_acs)
 head(ca_acs_df)
 ```
 
-**Task 2: Import hospitalization table**
+### Task 2: Import hospitalization table
 
 ```{r Read health outcome data}
 
@@ -161,7 +159,7 @@ ca_er_df$ER_visits <- as.numeric(
   gsub("N/A", NA, ca_er_df$Number_of_cases))
 ```
 
-**Task 3: Import California shapefile containing joined NOAA and NLCD data**
+### Task 3: Import California shapefile containing joined NOAA and NLCD data
 
 ```{r Read Covariate table}
 ### Open the covariates feature class using arc.open function
@@ -213,7 +211,7 @@ ca_cov_sf <- arc.data2sf(ca_cov_df) %>%
   )
 ```
 
-**Task 4: Assemble the modeling table by joining the data onto a spatial data frame**
+### Task 4: Assemble the modeling table by joining the data onto a spatial data frame
 
 ```{r Join the Heat Illness and ACS variable tables onto the spatial data frame}
 
@@ -249,7 +247,7 @@ model_no_geom <- st_drop_geometry(model_sf)
 head(model_no_geom)
 ```
 
-**Task 5: Diagnose the missingness of the model data frame**
+### Task 5: Diagnose the missingness of the model data frame
 
 ```{r Imputation of missing predictor and explantory variables}
 
@@ -358,6 +356,7 @@ corrplot::corrplot(
   tl.col = "black",
   tl.cex = 0.5)
 ```
+
 This section generates a pairwise correlation matrix for all imputed candidate predictors, and visualizes the matrix with a diverging color scale. The plot reveals potential multicollinearity among the candidate predictors, which can cause difficulties in quantifying posterior uncertainty in a Bayesian regression. This informs whether careful variable selection may be warranted before fitting the model.
 
 ```{r Prior checks}
@@ -419,7 +418,7 @@ b <- matrix(0, nrow = p, ncol = n_draws)
 
 b[1,] <- rnorm(n_draws, beta0_mean, beta0_sd)
 
-b[2:p,] <-matrix(rnorm((p-1)*n_draws, 0, beta_sd), nrow = p - 1)
+b[2:p,] <- matrix(rnorm((p-1)*n_draws, 0, beta_sd), nrow = p - 1)
 
 ### Prior predictive check
 
@@ -439,11 +438,12 @@ ggplot(df_prior, aes(x = y)) +
     y = "Density"
   )
 ```
+
 The prior predictive distribution is sharply centered at zero with extremely heavy concentration around the mean and relatively thin and long tails extending beyond 3,000 emergency room visits per 100,000 residents. This shape reflects the combination of relatively small coefficient priors (β_sd = 0.5) and a modest observation noise prior (σ = 2), applied to predictors on their original scale. The concentration centered near zero indicates, prior to observing data, the model strongly favors mean emergency visit rates close to zero, with only rare draws producing extreme values. In the context of this study, this prior is conservative, as it encodes the belief that large changes in emergency visit rates due to environmental or socioeconomic predictors are unlikely without data evidence.
 
 Given that real world emergency room visit rates per 100,000 residents can vary substantially during extreme heat events, this prior predictive spread may be too narrow to fully capture the extremes. The long but infrequent tails indicate that large effects are possible under the prior, but their probability is minimal. If domain knowledge suggests a wider range of plausible baseline outcomes or stronger predictor effects, adjusting the priors or standardizing all predictors before prior checks could yield a prior predictive distribution more consistent with the observed scale of the phenomenon.
 
-**Task 6: Construct INLA Model**
+### Task 6: Construct INLA Model
 
 ``` {r Build spatial adjacency and construct the model}
 
@@ -497,13 +497,14 @@ inla_fit <- inla(
 
 summary(inla_fit)
 ```
+
 We subset the data to complete cases, constructed **contiguity neighbors** and exported them as an **INLA graph file**,and then matched an integer **ID** with the graph order. Next, defining a **Gaussian BYM2** model decomposing spatial effects into structured and unstructured components and fit it with **INLA**, and then requesting **DIC, WAIC, and CPO** for model diagnostics for further assessment and interpretation. This enables partial pooling across adjacent counties while allowing non-spatial heterogeneity, which addresses spatial dependence in heat related emergency room visit rates.
 
 The BYM2 spatial regression model fits adequately for county level emergency room visits during periods of extreme heat: The DIC = 89.6 and WAIC = 89.6 are modest with small effective parameter counts (10 and 8), indicating a good balance of fit versus complexity rather than overfitting. CPO was also computed, which suggests the posterior predictive distribution generally covers observed county rates, and that counties with unusually small CPO's would be places where the model under predicts risk and may need additional covariates to consider in the model. In Bayesian terms, the model appears to perform decent for out of sample predictions, while borrowing strength across neighboring counties through the BYM2 spatial effect.
 
 The variable **Mean_TMAX** highlights positive association with emergency room visits (posterior mean = 0.63, 95% credible interval = 0.26 - 1.02), which indicates higher daily max temps are credibly linked to more heat-related emergency room visits. The other covariates 95% credible intervals include zero (precipitation, wind, land surface temperature, urbanization, poverty, age 65+, pre-1939 housing), implying insufficient evidence in this model to claim non zero effects after accounting for temperature and spatial structure. Overall, temperature is the most well identified driver in this model specification, while other effects remain uncertain and could be clarified with alternative specifications.
 
-**Task 7: Summarize and visualize the model results**
+### Task 7: Summarize and visualize the model results
 
 ```{r Posterior summaries and spatial plotting of model results}
 
@@ -573,6 +574,8 @@ model_sf_full <- left_join(
 )
 ```
 
+### Posterior mean map
+
 ```{r Posterior Mean plot}
 
 ### Map the posterior mean (higher values = more uncertainty)
@@ -583,6 +586,8 @@ ggplot(model_sf_full) +
   theme_minimal() +
   labs(title = "Uncertainty (Posterior Mean)")
 ```
+
+### Posterior standard deviation map
 
 ``` {r Posterior standard deviation plot}
 
@@ -595,6 +600,8 @@ ggplot(model_sf_full) +
   labs(title = "Uncertainty (Posterior SD)")
 ```
 
+### Posterior 95% credible interval width map
+
 ```{r Posterior 95% credible interval width plot}
 
 ### Map the posterior 95% credible interval width (higher values = more uncertainty)
@@ -605,9 +612,12 @@ ggplot(model_sf_full) +
   theme_minimal() +
   labs(title = "Uncertainty (Posterior CI Width)")
 ```
+
 This section extracts posterior fitted summaries (mean, standard deviation, and 95% credible intervals) from the model, computes a credible interval width as an uncertainty measure, and maps the posterior mean, standard deviation, and credible interval width across counties. Darker areas indicate higher uncertainty in the fitted mean emergency room visit rate, highlighting counties where data are sparse, predictors are less informative, or spatial borrowing leaves greater ambiguity.
 
 Based on the resulting plots, the posterior mean map highlights that lighter areas are indicative of higher risk of heat related illness, whereas dark areas represent lower risk to heat related illness. This pattern is the most concerning in Imperial and Shasta counties, with moderate concern of this health risk in Butte county.In counties in close proximity to the coast, such as Los Angeles county, the risk is minimal. Both the posterior standard deviation and 95% CI width map highlight where estimates are least certain. Uncertainty is higher in isolated counties, as the model has less information to borrow in these areas. Areas with sufficiently modeled neighbors show tighter uncertainty due to stronger spatial pooling.
+
+### Residual map
 
 ```{r Residual plot}
 
@@ -622,9 +632,12 @@ ggplot(model_sf_full) +
   theme_minimal() +
   labs(title = "Spatial Residuals (Predicted - Observed)")
 ```
+
 This section computes residuals as **Predicted − Observed**, then maps them to reveal **systematic bias**. Light colors indicate **overprediction**, whereas dark colors indicate **underprediction**. Spatial clustering of similar residual values suggest remaining structure not captured by the fixed effects or the INLA model component. 
 
 Based on the resulting plot, counties with positive residual values (lighter colors) represent higher than expected risk of heat related illness, and this is observed in Ventura and San Joaquin counties, given the parameters that were modeled. Conversely, counties with negative residual values (darker colors) represent lower than expected risk of heat related illness, and this can be observed in Butte, Contra Costa, Sacramento, and San Bernardino counties. 
+
+### Predicted vs observed plot
 
 ```{r Predicted vs Observed plot}
 
@@ -674,6 +687,7 @@ ggplot(df_post, aes(x = y)) +
     y = "Density"
   )
 ```
+
 **Research question**:
 
 How do environmental and socioeconomic factors influence the risk of heat-related health concerns across counties in California during periods of extreme heat?
